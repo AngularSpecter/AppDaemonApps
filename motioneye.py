@@ -16,7 +16,18 @@ import re
 # to be set to "off" (allowing external access to the API.  As the control is via the motion daemon, this
 # class also works with other packages built on motion, such as MotionEye
 #
-# App input parameters:
+#  Example app config:
+#
+#  kitchen_camera:
+#    module: motioneye
+#    class: MotionEye
+#    entity_id:         camera.kitchen
+#    URL:               "http://192.168.1.10:7999/1/"
+#    brightness_entity: input_number.kitchen_camera_brightness
+#    contrast_entity:   input_number.kitchen_camera_contrast
+#    saturation_entity: input_number.kitchen_camera_saturation
+#
+# Available App input parameters:
 # --------------------------------
 #  URL               [ required ] :  Url to the camera.  This should include the API port and the camera instance number.  E.g. http://camera:7999/1/
 #  entity_id         [ optional ] :  HASS entity associated with the camera.  This is required to enable binding to events (see below)
