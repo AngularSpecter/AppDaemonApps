@@ -9,9 +9,59 @@ import json
 import re
 
 ##################################################
+# MotionEye camera control
 #
-# entity   : hass sensor for washing machine power
+# An AppDaemon based controller for cameras running the motion daemon.  This class interacts with the
+# raw motion daemon over the HTTP interface.  It requires the webcontrol_localhost setting in motion.conf
+# to be set to "off" (allowing external access to the API.  As the control is via the motion daemon, this
+# class also works with other packages built on motion, such as MotionEye
+#
+# App input parameters:
+# --------------------------------
+#  URL               [ required ] :  Url to the camera.  This should include the API port and the camera instance number.  E.g. http://camera:7999/1/
+#  entity_id         [ optional ] :  HASS entity associated with the camera.  This is required to enable binding to events (see below)
+#  brightness_entity [ optional ] :  HASS input_number entity to bind to for image brightness value.  Numbers are remapped from motion's 0-255 scale to a 0-100 scale
+#  contrast_entity   [ optional ] :  HASS input_number entity to bind to for image contrast value. Numbers are remapped from motion's 0-255 scale to a 0-100 scale
+#  hue_entity        [ optional ] :  HASS input_number entity to bind to for image hue value. Numbers are remapped from motion's 0-255 scale to a 0-100 scale
+#  saturation_entity [ optional ] :  HASS input_number entity to bind to for image saturation value. Numbers are remapped from motion's 0-255 scale to a 0-100 scale
+#  threshold_entity  [ optional ] :  HASS input_number entity to bind to for motion detection threshold value. Numbers is number of pixels
+#  detection_entity  [ optional ] :  HASS input_boolean entity to bind to for image contrast value. 
+#
+#  With valid HASS entities passed through the yaml configuration, the motion daemon's settings will be updated as values in the UI are changed.  This allows for live 
+#  updating the values from the UI.  For image related properties( brightness, contrast, hue, saturation ), the values are expected to be in the range of 0:100 from the UI.
+#  They are then remapped to the 0:255 range expected by motion.  Updating these values via the HASS entities also causes motion detection to be paused for 2s after the setting
+#  update.  This is designed to allow the image to stabilize and not cause a false alarm.
+#
+#  EVENT calls
+#  --------------------------------
+#  The motion daemon can also be interacted with via HASS events.  There are three events this daemon binds to and listens for:
+#
+#  motion_snapshot
+#    This event causes the camera to capture (and store locally) a single snapshot frame.
 # 
+#    event data:
+#      entity_id : entity ID of the camera to trigger.  An ID of "ALL" will cause all cameras to trigger
+#
+#
+#  motion_prop_changed
+#    This event updates an arbitrary property within the motion daemon.  It is a direct connection to the motion web API.  Property names and values are passed in the event data
+#    as key->value pairs.  Values are not rescaled and need to be validated against the motion web API documentation ( https://motion-project.github.io/motion_config.html#Configuration_OptionsAlpha ).
+#    For properties that also have a corrisponding registerd hass entity, the hass entity will be updated with the new value.  Any changes made via the event call will be reflected live in the UI
+#
+#    event data:
+#      entity_id     :  entity ID of the camera to update
+#      < prop name > : < value >
+#       .....
+#      < prop name > : < value >
+#      
+#  motion_det_mode_changed
+#    This event enables/disables motion detection at the camera
+#
+#    event data:
+#      entity_id  :  entity ID of the camera to update
+#      enabled    : [ True | False ]         
+#
+############################################################### 
 
 class MotionEye( hass.Hass ):
 
@@ -19,11 +69,17 @@ class MotionEye( hass.Hass ):
 
     self.log("Motioneye starting up")
    
-## Validate inputs
+    ## Validate inputs
     self.url_valid = False
     if "URL" in self.args:
       URL = self.args[ "URL" ]
       self.url_valid = True
+
+    self.entity_registered = False
+    if "entity_id" in self.args:
+      self.entity_id = self.args[ "entity_id" ]
+      self.entity_registered = True
+      self.log("Using {} as entity ID for registering event calls".format( self.entity_id ) )
 
     self.det_start_scheduler = None
 
@@ -33,13 +89,6 @@ class MotionEye( hass.Hass ):
     self.sat_valid      = self.validate_param("saturation_entity", "input_number",  False )
     self.det_valid      = self.validate_param("detection_entity" , "input_boolean", False )
     self.thresh_valid   = self.validate_param("threshold_entity" , "input_number",  False )
-
-    #noise_level
-    #text_left
-    #locate_motion_mode
-    #snapshot
-    #snapshot_interval
-    #timelapse stuff
 
     should_run = True
     if self.url_valid:
@@ -88,10 +137,51 @@ class MotionEye( hass.Hass ):
       if self.thresh_valid:   self.listen_state( self.change_threshold,  self.args["threshold_entity" ] )
 
       ##Register Event listeners
-      #self.listeners.snapshot   = self.listen_event( self.snapshot_CB    , "motion_snapshot"         ) 
-      #self.listeners.imag_prop  = self.listen_event( self.camera_props_CB, "motion_cam_prop_changed" )   
-      #self.listeners.det_prop   = self.listen_event( self.dete_props_CB  , "motion_det_prop_changed" )
+      self.listeners = {}
+      self.listeners["snapshot"   ]  = self.listen_event( self.snapshot_CB, "motion_snapshot") 
+      if self.entity_registered: self.listeners["update_prop"]  = self.listen_event( self.update_setting_event_CB, "motion_prop_changed"    , entity_id = self.entity_id )   
+      if self.entity_registered: self.listeners["detection"  ]  = self.listen_event( self.det_mode_CB            , "motion_det_mode_changed", entity_id = self.entity_id )
+
   ###########################################################
+  def snapshot_CB( self, event_name, data, kwargs ):
+    #check if we should fire
+    if 'entity_id' in data:
+      should_fire = False
+      if data["entity_id"] == "ALL":                                      should_fire = True
+      if self.entity_registered and data["entity_id"] == self.entity_id:  should_fire = True
+      if should_fire:
+        self.log("Snapshot triggered")
+        self.trigger_snapshot()        
+  
+  #############################################################
+  def update_setting_event_CB( self, event_name, data, kwargs ):
+    for item in data:
+      propName = item
+      propVal  = data[item]
+      if propName == 'entity_id': continue
+
+      success  = self.set_property( propName, propVal )
+      if success:
+        if propName == 'brightness' and self.bright_valid:   self.set_value( self.args["brightness_entity"], float(propVal)/255 * 100 )
+        if propName == 'contrast'   and self.contrast_valid: self.set_value( self.args["contrast_entity"  ], float(propVal)/255 * 100 )
+        if propName == 'hue'        and self.hue_valid:      self.set_value( self.args["hue_entity"       ], float(propVal)/255 * 100 )
+        if propName == 'saturation' and self.sat_valid:      self.set_value( self.args["saturation_entity"], float(propVal)/255 * 100 )
+        if propName == 'threshold'  and self.thresh_valid:   self.set_value( self.args["threshold_entity" ], float(propVal)           )
+      else: self.error("{} is not a valid property".format(propName))
+      
+  #################################################
+  def det_mode_CB( self, event_name, data, kwargs ):
+      if 'enabled' in data:
+        mode = data['enabled']
+        if mode == 'True' or mode == 'true' or mode == 'On' or mode == 'on' or mode == '1': 
+          self.start_detection()
+          if self.det_valid: self.set_value( self.args["detection_entity"], "On" )
+    
+        if mode == 'False' or mode == 'false' or mode == 'Off' or mode == 'off' or mode == '0': 
+          self.stop_detection()
+          if self.det_valid: self.set_value( self.args["detection_entity"], "Off" )
+
+  ###################################################################
   def state_change( self, entity, attribute, old, new, kwargs ):
     self.log( entity )
     self.log( attribute )
@@ -152,11 +242,23 @@ class MotionEye( hass.Hass ):
     url_stub = 'config/set?{}={}'.format( prop_name, value )
     full_url = '{}{}'.format(self.base_url, url_stub )
 
-    with urllib.request.urlopen( full_url ) as response:
-      html = response.read().decode('utf-8')
-    match = re.findall( '{}</a>\s=\s([\d]+)'.format( prop_name ), html )
-    return match[0]
+    try:
+      with urllib.request.urlopen( full_url ) as response:
+        html = response.read().decode('utf-8')
+    except:
+      self.log( "ERROR" )
+      return False
 
+    return True
+
+ #####################################
+  def trigger_snapshot( self ):
+    url_stub = 'action/snapshot'
+    full_url = '{}{}'.format(self.base_url, url_stub )
+
+    with urllib.request.urlopen( full_url ) as response:
+      html = response.read().decode('utf-8') 
+ 
  #####################################
   def get_det_mode( self ):
     url_stub = 'detection/status'
