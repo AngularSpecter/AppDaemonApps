@@ -12,9 +12,17 @@ import re
 # MotionEye camera control
 #
 # An AppDaemon based controller for cameras running the motion daemon.  This class interacts with the
-# raw motion daemon over the HTTP interface.  It requires the webcontrol_localhost setting in motion.conf
-# to be set to "off" (allowing external access to the API.  As the control is via the motion daemon, this
-# class also works with other packages built on motion, such as MotionEye
+# raw motion daemon over the HTTP interface.  It requires the following settings added to the main motion.conf:
+#
+#    webcontrol_localhost off
+#    webcontrol_html_output on
+#    webcontrol_port 7999
+#    webcontrol_params 2
+#
+#
+# This enables the external API, sets it to HTML mode and binds it to port 7999.
+# As the control is via the motion daemon, this class also works with other packages
+# built on motion, such as MotionEye
 #
 #  Example app config:
 #
@@ -149,7 +157,7 @@ class MotionEye( hass.Hass ):
 
       ##Register Event listeners
       self.listeners = {}
-      self.listeners["snapshot"   ]  = self.listen_event( self.snapshot_CB, "motion_snapshot") 
+      self.listeners["snapshot"   ]                             = self.listen_event( self.snapshot_CB, "motion_snapshot") 
       if self.entity_registered: self.listeners["update_prop"]  = self.listen_event( self.update_setting_event_CB, "motion_prop_changed"    , entity_id = self.entity_id )   
       if self.entity_registered: self.listeners["detection"  ]  = self.listen_event( self.det_mode_CB            , "motion_det_mode_changed", entity_id = self.entity_id )
 
